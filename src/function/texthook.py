@@ -3,7 +3,12 @@ import re
 
 import uiautomation as auto
 
+from .dedup import Deduplicator
 from .save import save_txt
+from .config import SIMILARITY, STABLE_THRESHOLD
+
+
+deduper = Deduplicator()
 
 
 def normalize_caption_text(text: str) -> str:
@@ -50,7 +55,6 @@ def split_caption_text(text: str) -> tuple[list[str], str]:
 
         end = index + 1
         while end < len(text) and text[end] in "，。！？；.;!?":
-            # Do not treat the decimal point in e.g. 3.14 as punctuation.
             if (
                 text[end] == "."
                 and end > 0
@@ -70,13 +74,12 @@ def split_caption_text(text: str) -> tuple[list[str], str]:
     return completed, text[start:].strip()
 
 
-def overlap_length(previous: list[str], current: list[str]) -> int:
-    """Find the exact shared boundary between successive caption snapshots."""
-    maximum = min(len(previous), len(current))
-    for size in range(maximum, 0, -1):
-        if previous[-size:] == current[:size]:
-            return size
-    return 0
+def is_similar_to_saved(sentence: str, saved_sentences: list[str]) -> bool:
+    """Keep similarity deduplication separate from the stability gate."""
+    return any(
+        deduper.similarity_ratio(sentence, saved) >= SIMILARITY
+        for saved in saved_sentences
+    )
 
 
 def lc_detect() -> bool:
@@ -100,9 +103,9 @@ def lc_detect() -> bool:
 
 
 async def hook(filename, exit_event):
-    """Write captions as displayed, with only whitespace and sentence splitting."""
-    previous_completed: list[str] = []
-    trailing_text = ""
+    """Save stable displayed captions without rewriting their text."""
+    stable_counts: dict[str, int] = {}
+    saved_sentences: list[str] = []
 
     try:
         if not lc_detect():
@@ -120,26 +123,36 @@ async def hook(filename, exit_event):
             ClassName="ScrollViewer",
         )
 
-        print("Start capture...")
+        print(
+            "Start capture... "
+            f"STABLE_THRESHOLD={STABLE_THRESHOLD}, SIMILARITY={SIMILARITY}"
+        )
 
         while not exit_event.is_set():
-            current_text = captions_scrollviewer.Name
-            completed, trailing_text = split_caption_text(current_text)
+            completed, _ = split_caption_text(captions_scrollviewer.Name)
+            current_sentences = set(completed)
+            next_counts: dict[str, int] = {}
 
-            overlap = overlap_length(previous_completed, completed)
-            for sentence in completed[overlap:]:
+            for sentence in current_sentences:
+                next_counts[sentence] = stable_counts.get(sentence, 0) + 1
+
+                # A sentence must appear in three consecutive reads before saving.
+                if next_counts[sentence] < STABLE_THRESHOLD:
+                    continue
+
+                # This is independent from stability: suppress saved text at >= 0.85 similarity.
+                if is_similar_to_saved(sentence, saved_sentences):
+                    continue
+
                 print(f"[SAVE] {sentence}")
                 await save_txt(filename, sentence)
+                saved_sentences.append(sentence)
 
-            previous_completed = completed
+            stable_counts = next_counts
             await asyncio.sleep(0.25)
 
     except Exception as error:
         print(f"Exception caught: {error}")
         return False
     finally:
-        # The only unfinished caption is saved once when capture ends.
-        if trailing_text:
-            print(f"[SAVE ON EXIT] {trailing_text}")
-            await save_txt(filename, trailing_text)
         print("[EXIT] Done!")
