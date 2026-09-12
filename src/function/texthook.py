@@ -1,6 +1,7 @@
 import asyncio
 import re
 from dataclasses import dataclass
+from collections.abc import Callable
 
 import uiautomation as auto
 
@@ -84,7 +85,6 @@ def align_tracks(
     """Carry observations forward for the same displayed caption occurrences."""
     previous_sentences = [track.text for track in previous_tracks]
 
-    # The usual case: the window retains existing captions and appends new ones.
     if (
         len(current_sentences) >= len(previous_sentences)
         and current_sentences[: len(previous_sentences)] == previous_sentences
@@ -93,7 +93,6 @@ def align_tracks(
             CaptionTrack(text) for text in current_sentences[len(previous_tracks) :]
         ]
 
-    # When the window scrolls, retain the exact suffix still visible.
     maximum = min(len(previous_tracks), len(current_sentences))
     for size in range(maximum, 0, -1):
         if previous_sentences[-size:] == current_sentences[:size]:
@@ -101,7 +100,6 @@ def align_tracks(
                 CaptionTrack(text) for text in current_sentences[size:]
             ]
 
-    # The display changed materially, so begin observing its new occurrences.
     return [CaptionTrack(text) for text in current_sentences]
 
 
@@ -125,7 +123,11 @@ def lc_detect() -> bool:
         return False
 
 
-async def hook(filename, exit_event):
+async def hook(
+    filename: str,
+    exit_event,
+    formatter: Callable[[str], str] | None = None,
+):
     """Save each displayed caption occurrence after it has stabilized."""
     tracks: list[CaptionTrack] = []
 
@@ -156,8 +158,15 @@ async def hook(filename, exit_event):
                 if track.saved or track.observations < STABLE_THRESHOLD:
                     continue
 
-                print(f"[SAVE] {track.text}")
-                await save_txt(filename, track.text)
+                caption = track.text
+                if formatter is not None:
+                    try:
+                        caption = formatter(track.text)
+                    except Exception as error:
+                        print(f"[FORMAT ERROR] Saving raw caption instead: {error}")
+
+                print(f"[SAVE] {caption}")
+                await save_txt(filename, caption)
                 track.saved = True
 
             await asyncio.sleep(0.25)
