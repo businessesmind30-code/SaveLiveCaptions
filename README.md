@@ -9,6 +9,7 @@
 - ✨ Save live captions to a text file.
 - 😃 Minimalist floating dashboard.
 - 📝 Captions are saved without timestamps, duplicate suppression, minimum-length filtering, or text rewriting. Each displayed caption occurrence is saved after it appears in three consecutive reads. Whitespace cleanup and punctuation-based sentence boundaries are applied; decimal numbers remain intact.
+- 🧪 Optional subject modes apply conservative textbook-style notation only when selected from the command line.
 
 ### Installation
 
@@ -40,6 +41,24 @@ If you prefer to run the code directly, follow these steps in your bash/PowerShe
    ```bash
    python src/main.py
    ```
+
+### Academic notation modes
+
+The default command preserves captions as ordinary text. Select exactly one optional mode when the lecture subject needs notation:
+
+```bash
+python src/main.py --chem
+python src/main.py --math
+python src/main.py --physics
+```
+
+The shorter aliases `-chem`, `-math`, and `-physics` work too.
+
+- `--chem` formats clear chemical formulas, ions, electron configurations, thermodynamic symbols, chemistry units, and equation arrows.
+- `--math` formats clear powers, roots, integrals, comparison signs, and common operators.
+- `--physics` includes math notation plus common physics equations, units, and Greek symbols.
+
+The app keeps the raw caption unchanged until it has been observed three times; formatting happens only when it is saved. Patterns are deliberately conservative, so ambiguous spoken language stays as caption text rather than being guessed.
 
 ### Guidelines
 
