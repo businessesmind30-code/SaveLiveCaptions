@@ -8,7 +8,7 @@
 
 - ✨ Save live captions to a text file.
 - 😃 Minimalist floating dashboard.
-- 📝 Captions are saved without timestamps, deduplication, minimum-length filtering, or text rewriting. Only whitespace cleanup and punctuation-based sentence boundaries are applied; decimal numbers remain intact.
+- 📝 Captions are saved without timestamps, minimum-length filtering, or text rewriting. A completed caption must appear in three consecutive reads before saving, and a sentence at least 0.85 similar to an already saved sentence is omitted. Whitespace cleanup and punctuation-based sentence boundaries are applied; decimal numbers remain intact.
 
 ### Installation
 
