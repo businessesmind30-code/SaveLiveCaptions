@@ -1,169 +1,108 @@
-import sys
-import os
 import asyncio
-import uiautomation as auto
-from typing import Dict, Any
-import time
-from . import save
-from .save import save_replace_txt, save_txt
 import re
 
-from function.dedup import Deduplicator
-from function.config import MIN_LENGTH, SIMILARITY, STABLE_THRESHOLD, MAX_SAVED_SENTENCES
+import uiautomation as auto
 
-last_full_text = ""
-deduper=Deduplicator()
+from .save import save_txt
 
 
-current_sentences : dict[str, int] = {}  # {sentence: stable_count}
+def normalize_caption_text(text: str) -> str:
+    """Keep the displayed text intact apart from collapsing whitespace."""
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def is_already_saved(sentence: str, threshold: float = 0.85) -> bool:
-    """check similarity"""
-    for (_,saved) in save.saved_captions:
-        if deduper.similarity_ratio(sentence, saved) >= threshold:
-            return True
-    return False
+def is_sentence_boundary(text: str, index: int, contains_chinese: bool) -> bool:
+    """Return whether the character at index completes a caption sentence."""
+    char = text[index]
 
+    if char == "，":
+        return contains_chinese
 
-def split_into_sentences(text: str)-> list[str]:
-    if not text:
-        return []
-    
-    # handle space
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    # -- Add email / url protection here if needed --
-    placeholders: Dict[str, Any] = {}
-    def protect(pattern, repl_prefix):
-        nonlocal text
-        def replacer(m):
-            key = f"__{repl_prefix}{len(placeholders)}__"
-            placeholders[key] = m.group(0)
-            return key
-        text = re.sub(pattern, replacer, text)
-    
-    protect(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', 'EMAIL')
-    protect(r'https?://[^\s]+', 'URL')
-    protect(r'\b[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', 'DOMAIN')  # economist.com 
-
-    # safe split, avoid splitting numbers like "3.14" or "2023.09.01" or "Ms. Menro"
-    # specialized for Chinese, the live captions usually use "，" to separate long sentences without punctuation, so we can split by "，" if the sentence is too long and contains "，"
-    chinese_punctuation = r'([，。！；？.;!?]+(?![0-9]))|((?<![A-Za-z0-9\w])\.(?![A-Za-z0-9]))'
-    # general_punctuation is for English and other language
-    general_punctuation = r'([。！？.;!?]+(?![0-9]))|((?<![A-Za-z0-9\w])\.(?![A-Za-z0-9]))'
-    
-
-    sentences = []
-    i = 0
-    current=""
-    
-
-    while i < len(text):
-        current += text[i]
-        is_chinese = bool(re.search(r'[\u4e00-\u9fff]', current))
-        # -- for Chinese, split by punctuation --
-        if is_chinese:
-            if re.search(chinese_punctuation, current):
-                sentence = current.strip()
-                for k, v in placeholders.items():
-                    sentence = sentence.replace(k, v)
-                if deduper.is_substantial_sentence(sentence):
-                    sentences.append(sentence)
-                current = ""      
-        else:
-            # -- for non-Chinese, split by punctuation --
-            if re.search(general_punctuation, current):
-                sentence = current.strip()
-                for k, v in placeholders.items():
-                    sentence = sentence.replace(k, v)
-                if deduper.is_substantial_sentence(sentence):
-                    sentences.append(sentence)
-                current = ""
-        i += 1
-    
-    # handle last part
-    if current.strip():
-        sentence = current.strip()
-        if deduper.is_substantial_sentence(sentence):
-            sentences.append(sentence)
-    
-    return sentences
-
-def find_and_replace_similar(sentence: str, threshold: float = 0.85, max_time_diff: float = 3.0)-> tuple[None|int, bool]:
-    """
-    find similar sentence  
-    if found and the new sentence is better, replace it and return True,
-    otherwise return False
-    """
-    current_time = time.time()
-    # for short sentences, use higher threshold to avoid false positive
-    threshold = 0.92 if len(sentence) <= 20 else threshold  
-    for i, (saved_time, saved_text) in enumerate(save.saved_captions):
-        if deduper.similarity_ratio(sentence, saved_text) >= threshold:
-            # if in time window, consider replacing if it's a better version
-            if current_time - saved_time <= max_time_diff:
-                should_replace = deduper.is_better_version(sentence, saved_text)
-                return (i, should_replace)
-            else:
-                # if it's too old, consider it as a new sentence and don't replace
-                return (None, False)
-    return (None, False)
-
-def is_incomplete_sentence(s: str) -> bool:
-    s = s.strip()
-    if not s:
-        return True
-    
-    is_chinese = bool(re.search(r'[\u4e00-\u9fff]', s))
-    # --for Chinese lossely judging--
-    if is_chinese:
-        # allow '，' for Chinese, but not for non-Chinese
-        if s[-1] in ',，；;':
-            return False
-        
-        return True
-
-    #--for non-Chinese--
-    else:
-        if s[-1] in '.。!?！？':
-            return False
-        # if the sentence doesn't end with punctuation, it's likely incomplete
-        if not re.search(r'[.。!?！？]', s):
-            return True
+    if char not in "。！？；.;!?":
         return False
 
-def is_last_line_of_file(current_j: int, total_lines: int) -> bool:
-    """if the sentence is in the last 3 lines of the file, consider it as important and keep it"""
-    return current_j >= total_lines - 3   
+    # A dot inside a number is a decimal separator, not sentence punctuation.
+    if char == ".":
+        previous = text[index - 1] if index else ""
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if previous.isdigit() and following.isdigit():
+            return False
+
+    return True
+
+
+def split_caption_text(text: str) -> tuple[list[str], str]:
+    """Split only at displayed punctuation while preserving caption wording."""
+    text = normalize_caption_text(text)
+    if not text:
+        return [], ""
+
+    completed: list[str] = []
+    start = 0
+    contains_chinese = False
+
+    for index, char in enumerate(text):
+        if "\u4e00" <= char <= "\u9fff":
+            contains_chinese = True
+
+        if not is_sentence_boundary(text, index, contains_chinese):
+            continue
+
+        end = index + 1
+        while end < len(text) and text[end] in "，。！？；.;!?":
+            # Do not treat the decimal point in e.g. 3.14 as punctuation.
+            if (
+                text[end] == "."
+                and end > 0
+                and end + 1 < len(text)
+                and text[end - 1].isdigit()
+                and text[end + 1].isdigit()
+            ):
+                break
+            end += 1
+
+        sentence = text[start:end].strip()
+        if sentence:
+            completed.append(sentence)
+        start = end
+        contains_chinese = False
+
+    return completed, text[start:].strip()
+
+
+def overlap_length(previous: list[str], current: list[str]) -> int:
+    """Find the exact shared boundary between successive caption snapshots."""
+    maximum = min(len(previous), len(current))
+    for size in range(maximum, 0, -1):
+        if previous[-size:] == current[:size]:
+            return size
+    return 0
+
 
 def lc_detect() -> bool:
     try:
         auto.SetGlobalSearchTimeout(0.5)
-        
         desktop = auto.GetRootControl()
         captions_window = desktop.Control(
             searchDepth=1,
             ClassName="LiveCaptionsDesktopWindow",
-            timeout = 0.2
+            timeout=0.2,
         )
-
-
         if captions_window.Exists(0):
-            print ("Live Captions Found")
+            print("Live Captions Found")
             return True
-        else:
-            print(f"Live Captions Not Found")
-            return False
 
-    except Exception as e:
-        print(f"Live Captions Not Found: {str(e)[:50]}...")
+        print("Live Captions Not Found")
+        return False
+    except Exception as error:
+        print(f"Live Captions Not Found: {str(error)[:50]}...")
         return False
 
 
 async def hook(filename, exit_event):
-    global last_full_text, current_sentences
-    seen_sentences = set()  # for quick lookup of already saved sentences
+    """Write captions as displayed, with only whitespace and sentence splitting."""
+    previous_completed: list[str] = []
+    trailing_text = ""
 
     try:
         if not lc_detect():
@@ -172,113 +111,35 @@ async def hook(filename, exit_event):
         desktop = auto.GetRootControl()
         captions_window = desktop.Control(
             searchDepth=1,
-            ClassName="LiveCaptionsDesktopWindow"
+            ClassName="LiveCaptionsDesktopWindow",
         )
-        await asyncio.sleep(1)  # Wait for the window not to be empty
+        await asyncio.sleep(1)
         captions_scrollviewer = captions_window.Control(
             searchDepth=5,
             AutomationId="CaptionsScrollViewer",
-            ClassName="ScrollViewer"
+            ClassName="ScrollViewer",
         )
 
         print("Start capture...")
-        print(f"Settings: STABLE_THRESHOLD={STABLE_THRESHOLD}, MIN_LENGTH={MIN_LENGTH}, SIMILARITY={SIMILARITY}")
 
         while not exit_event.is_set():
-            current_text = captions_scrollviewer.Name.strip()
+            current_text = captions_scrollviewer.Name
+            completed, trailing_text = split_caption_text(current_text)
 
-            if not current_text:
-                await asyncio.sleep(0.5)  
-                continue
+            overlap = overlap_length(previous_completed, completed)
+            for sentence in completed[overlap:]:
+                print(f"[SAVE] {sentence}")
+                await save_txt(filename, sentence)
 
-            sentences = split_into_sentences(current_text)
+            previous_completed = completed
+            await asyncio.sleep(0.25)
 
-            current_frame_sentences = set(sentences)
-
-            new_current_sentences = {}
-            
-            for sentence in current_frame_sentences:
-                # filter incomplete sentence
-                if is_incomplete_sentence(sentence):
-                    continue
-
-                similar_index, should_replace = find_and_replace_similar(sentence)
-                
-                if similar_index is not None:
-                    if should_replace:
-                        old=save.saved_captions[similar_index]
-                        old_time,old_sentence = old
-                        save.saved_captions[similar_index] = (old_time, sentence)
-                        seen_sentences.discard(old_sentence)  # remove old sentence from seen set
-                        seen_sentences.add(sentence)  # add new sentence to seen set
-                        await save_replace_txt(filename,old,save.saved_captions[similar_index])
-                    continue
-                
-                if sentence in current_sentences:
-                    new_current_sentences[sentence] = current_sentences[sentence] + 1
-                else:
-                    new_current_sentences[sentence] = 1
-                
-                if new_current_sentences[sentence] >= STABLE_THRESHOLD:
-                    if not any(sentence == s for s in seen_sentences):
-                        print(f"[SAVE] {sentence}")
-                        seen_sentences.add(sentence)
-                        save.saved_captions.append((time.time(), sentence))
-                        await save_txt(filename, save.saved_captions[-1])
-                        
-                        # set a limit to remove sentences peridically
-                        # make same sentences which occurs after a kind of loop will be normally recorded
-                        if len(save.saved_captions) >= MAX_SAVED_SENTENCES:
-                            save.saved_captions.pop(0)  
-            
-            current_sentences = new_current_sentences
-                       
-            last_full_text = current_text
-
-            await asyncio.sleep(0.25) # Adjust the sleep time as needed
-
-    except Exception as e:
-        print(f"Exceptions Caught: {e}")
+    except Exception as error:
+        print(f"Exception caught: {error}")
         return False
-
-    finally:    
-        # save the last sentences when exit
-        try:
-            for sentence, _ in current_sentences.items():
-                if sentence not in seen_sentences:
-                    print(f"[SAVE ON EXIT] {sentence}")
-                    seen_sentences.add(sentence)
-                    save.saved_captions.append((time.time(), sentence))
-                    await save_txt(filename,save.saved_captions[-1])
-            
-            if last_full_text:
-                last_punct_match=None
-                last_two_punct_match = None
-                for m in re.finditer(r'[，。！？.;!?]+', last_full_text):
-                    last_two_punct_match =last_punct_match
-                    last_punct_match = m
-                if last_punct_match:
-                    trailing_text = last_full_text[last_punct_match.end():].strip()
-                else:
-                    trailing_text = last_full_text.strip()
-                
-                second_last_text = last_full_text[last_two_punct_match.end(): last_punct_match.start()+1].strip() if last_two_punct_match else ""
-                if second_last_text and second_last_text not in seen_sentences:
-                    if not any(deduper.similarity_ratio(second_last_text, s) >= SIMILARITY for s in seen_sentences):
-                        print(f"[SAVE SECOND LAST ON EXIT] {second_last_text}")
-                        seen_sentences.add(second_last_text)
-                        save.saved_captions.append((time.time(), second_last_text))
-                        await save_txt(filename,save.saved_captions[-1])
-
-                if trailing_text and trailing_text not in seen_sentences:
-                    if not any(deduper.similarity_ratio(trailing_text, s) >= SIMILARITY for s in seen_sentences):
-                        print(f"[SAVE TRAILING ON EXIT] {trailing_text}")
-                        seen_sentences.add(trailing_text)
-                        save.saved_captions.append((time.time(), trailing_text))
-                        await save_txt(filename,save.saved_captions[-1])
-        except Exception as e:
-            print(f"Error saving last sentences: {e}")
-        
-        await asyncio.to_thread(deduper.cleanup_file, filename)
-        
+    finally:
+        # The only unfinished caption is saved once when capture ends.
+        if trailing_text:
+            print(f"[SAVE ON EXIT] {trailing_text}")
+            await save_txt(filename, trailing_text)
         print("[EXIT] Done!")
