@@ -1,6 +1,7 @@
-"""Caption-capture settings.
+"""Caption-capture settings."""
 
-Caption text is no longer filtered, deduplicated, replaced, or timestamped.
-The hook keeps only whitespace normalization and punctuation-based sentence
-boundaries, including decimal-number protection.
-"""
+# A completed caption must appear in three consecutive reads before it is saved.
+STABLE_THRESHOLD = 3
+
+# Saved captions with similarity at or above this value are treated as duplicates.
+SIMILARITY = 0.85
