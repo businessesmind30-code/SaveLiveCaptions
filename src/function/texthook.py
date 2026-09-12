@@ -1,14 +1,18 @@
 import asyncio
 import re
+from dataclasses import dataclass
 
 import uiautomation as auto
 
-from .dedup import Deduplicator
 from .save import save_txt
-from .config import SIMILARITY, STABLE_THRESHOLD
+from .config import STABLE_THRESHOLD
 
 
-deduper = Deduplicator()
+@dataclass
+class CaptionTrack:
+    text: str
+    observations: int = 0
+    saved: bool = False
 
 
 def normalize_caption_text(text: str) -> str:
@@ -36,11 +40,11 @@ def is_sentence_boundary(text: str, index: int, contains_chinese: bool) -> bool:
     return True
 
 
-def split_caption_text(text: str) -> tuple[list[str], str]:
+def split_caption_text(text: str) -> list[str]:
     """Split only at displayed punctuation while preserving caption wording."""
     text = normalize_caption_text(text)
     if not text:
-        return [], ""
+        return []
 
     completed: list[str] = []
     start = 0
@@ -71,15 +75,34 @@ def split_caption_text(text: str) -> tuple[list[str], str]:
         start = end
         contains_chinese = False
 
-    return completed, text[start:].strip()
+    return completed
 
 
-def is_similar_to_saved(sentence: str, saved_sentences: list[str]) -> bool:
-    """Keep similarity deduplication separate from the stability gate."""
-    return any(
-        deduper.similarity_ratio(sentence, saved) >= SIMILARITY
-        for saved in saved_sentences
-    )
+def align_tracks(
+    previous_tracks: list[CaptionTrack], current_sentences: list[str]
+) -> list[CaptionTrack]:
+    """Carry observations forward for the same displayed caption occurrences."""
+    previous_sentences = [track.text for track in previous_tracks]
+
+    # The usual case: the window retains existing captions and appends new ones.
+    if (
+        len(current_sentences) >= len(previous_sentences)
+        and current_sentences[: len(previous_sentences)] == previous_sentences
+    ):
+        return previous_tracks + [
+            CaptionTrack(text) for text in current_sentences[len(previous_tracks) :]
+        ]
+
+    # When the window scrolls, retain the exact suffix still visible.
+    maximum = min(len(previous_tracks), len(current_sentences))
+    for size in range(maximum, 0, -1):
+        if previous_sentences[-size:] == current_sentences[:size]:
+            return previous_tracks[-size:] + [
+                CaptionTrack(text) for text in current_sentences[size:]
+            ]
+
+    # The display changed materially, so begin observing its new occurrences.
+    return [CaptionTrack(text) for text in current_sentences]
 
 
 def lc_detect() -> bool:
@@ -103,9 +126,8 @@ def lc_detect() -> bool:
 
 
 async def hook(filename, exit_event):
-    """Save stable displayed captions without rewriting their text."""
-    stable_counts: dict[str, int] = {}
-    saved_sentences: list[str] = []
+    """Save each displayed caption occurrence after it has stabilized."""
+    tracks: list[CaptionTrack] = []
 
     try:
         if not lc_detect():
@@ -123,32 +145,21 @@ async def hook(filename, exit_event):
             ClassName="ScrollViewer",
         )
 
-        print(
-            "Start capture... "
-            f"STABLE_THRESHOLD={STABLE_THRESHOLD}, SIMILARITY={SIMILARITY}"
-        )
+        print(f"Start capture... STABLE_THRESHOLD={STABLE_THRESHOLD}")
 
         while not exit_event.is_set():
-            completed, _ = split_caption_text(captions_scrollviewer.Name)
-            current_sentences = set(completed)
-            next_counts: dict[str, int] = {}
+            sentences = split_caption_text(captions_scrollviewer.Name)
+            tracks = align_tracks(tracks, sentences)
 
-            for sentence in current_sentences:
-                next_counts[sentence] = stable_counts.get(sentence, 0) + 1
-
-                # A sentence must appear in three consecutive reads before saving.
-                if next_counts[sentence] < STABLE_THRESHOLD:
+            for track in tracks:
+                track.observations += 1
+                if track.saved or track.observations < STABLE_THRESHOLD:
                     continue
 
-                # This is independent from stability: suppress saved text at >= 0.85 similarity.
-                if is_similar_to_saved(sentence, saved_sentences):
-                    continue
+                print(f"[SAVE] {track.text}")
+                await save_txt(filename, track.text)
+                track.saved = True
 
-                print(f"[SAVE] {sentence}")
-                await save_txt(filename, sentence)
-                saved_sentences.append(sentence)
-
-            stable_counts = next_counts
             await asyncio.sleep(0.25)
 
     except Exception as error:
