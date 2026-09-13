@@ -1,12 +1,12 @@
 import asyncio
 import re
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import uiautomation as auto
 
-from .save import save_txt
 from .config import STABLE_THRESHOLD
+from .save import save_txt
 
 
 @dataclass
@@ -79,28 +79,60 @@ def split_caption_text(text: str) -> list[str]:
     return completed
 
 
+def longest_common_subsequence(
+    previous_sentences: list[str], current_sentences: list[str]
+) -> list[tuple[int, int]]:
+    """Return ordered matching occurrences without collapsing duplicates."""
+    previous_count = len(previous_sentences)
+    current_count = len(current_sentences)
+    lengths = [
+        [0] * (current_count + 1) for _ in range(previous_count + 1)
+    ]
+
+    for previous_index in range(previous_count - 1, -1, -1):
+        for current_index in range(current_count - 1, -1, -1):
+            if previous_sentences[previous_index] == current_sentences[current_index]:
+                lengths[previous_index][current_index] = (
+                    1 + lengths[previous_index + 1][current_index + 1]
+                )
+            else:
+                lengths[previous_index][current_index] = max(
+                    lengths[previous_index + 1][current_index],
+                    lengths[previous_index][current_index + 1],
+                )
+
+    matches: list[tuple[int, int]] = []
+    previous_index = 0
+    current_index = 0
+    while previous_index < previous_count and current_index < current_count:
+        if previous_sentences[previous_index] == current_sentences[current_index]:
+            matches.append((previous_index, current_index))
+            previous_index += 1
+            current_index += 1
+        elif (
+            lengths[previous_index + 1][current_index]
+            >= lengths[previous_index][current_index + 1]
+        ):
+            previous_index += 1
+        else:
+            current_index += 1
+
+    return matches
+
+
 def align_tracks(
     previous_tracks: list[CaptionTrack], current_sentences: list[str]
 ) -> list[CaptionTrack]:
-    """Carry observations forward for the same displayed caption occurrences."""
+    """Keep state for unchanged occurrences through caption-window reflow."""
     previous_sentences = [track.text for track in previous_tracks]
+    aligned_tracks = [CaptionTrack(text) for text in current_sentences]
 
-    if (
-        len(current_sentences) >= len(previous_sentences)
-        and current_sentences[: len(previous_sentences)] == previous_sentences
+    for previous_index, current_index in longest_common_subsequence(
+        previous_sentences, current_sentences
     ):
-        return previous_tracks + [
-            CaptionTrack(text) for text in current_sentences[len(previous_tracks) :]
-        ]
+        aligned_tracks[current_index] = previous_tracks[previous_index]
 
-    maximum = min(len(previous_tracks), len(current_sentences))
-    for size in range(maximum, 0, -1):
-        if previous_sentences[-size:] == current_sentences[:size]:
-            return previous_tracks[-size:] + [
-                CaptionTrack(text) for text in current_sentences[size:]
-            ]
-
-    return [CaptionTrack(text) for text in current_sentences]
+    return aligned_tracks
 
 
 def lc_detect() -> bool:
